@@ -1,0 +1,8 @@
+{
+  "name": "MINECRAFT ONLINE WORLD",
+  "description": "Playable 3D voxel sandbox world built with Three.js featuring procedural biomes, smooth first & third-person camera controls, voxel building, and a blue neon interface.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
