@@ -11,8 +11,11 @@ import type {
   SocialStatePayload,
 } from '../types/game';
 
+export type ConnectionState = 'connecting' | 'online' | 'offline';
+
 export interface NetworkCallbacks {
   onConnected: (connected: boolean) => void;
+  onConnectionStateChange?: (state: ConnectionState) => void;
   onWelcome: (info: {
     playerId: string;
     nickname: string;
@@ -46,20 +49,110 @@ export class MultiplayerClient {
   private callbacks: NetworkCallbacks;
   private queue: Array<{ type: string; payload: unknown }> = [];
   private reconnectTimer: number | null = null;
+  private connectTimeoutTimer: number | null = null;
   private closed = false;
   private lastMoveSent = 0;
   private lockAbort: AbortController | null = null;
+  private broadcastChannel: BroadcastChannel | null = null;
+  private readonly tabNonce = `t_${Math.random().toString(36).slice(2, 10)}`;
+  private connected = false;
 
   public playerId = '';
   public nickname = '';
 
   constructor(callbacks: NetworkCallbacks) {
     this.callbacks = callbacks;
+    window.addEventListener('online', this.handleWindowOnline);
+    window.addEventListener('offline', this.handleWindowOffline);
     void this.initIdentityAndConnect();
   }
 
+  public isConnected(): boolean {
+    return this.connected && Boolean(this.ws && this.ws.readyState === WebSocket.OPEN);
+  }
+
+  private setConnState(state: ConnectionState) {
+    this.connected = state === 'online';
+    this.callbacks.onConnected(this.connected);
+    this.callbacks.onConnectionStateChange?.(state);
+  }
+
+  private handleWindowOnline = () => {
+    if (this.closed) return;
+    if (!this.isConnected()) {
+      if (this.reconnectTimer !== null) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+      this.connect();
+    }
+  };
+
+  private handleWindowOffline = () => {
+    if (this.closed) return;
+    this.setConnState('offline');
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {
+        // ignore
+      }
+      this.ws = null;
+    }
+  };
+
+  private async checkTabCollision(candidateId: string): Promise<boolean> {
+    if (typeof BroadcastChannel === 'undefined' || !candidateId) return false;
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const probe = new BroadcastChannel('mcow_tab_presence');
+      const timer = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        probe.close();
+        resolve(false);
+      }, 90);
+
+      probe.onmessage = (ev) => {
+        const msg = ev.data as { kind?: string; playerId?: string; tabNonce?: string };
+        if (
+          !settled &&
+          msg?.kind === 'pong' &&
+          msg.playerId === candidateId &&
+          msg.tabNonce !== this.tabNonce
+        ) {
+          settled = true;
+          clearTimeout(timer);
+          probe.close();
+          resolve(true);
+        }
+      };
+
+      probe.postMessage({ kind: 'ping', playerId: candidateId, tabNonce: this.tabNonce });
+    });
+  }
+
+  private setupPresenceChannel() {
+    if (typeof BroadcastChannel === 'undefined') return;
+    try {
+      this.broadcastChannel?.close();
+      this.broadcastChannel = new BroadcastChannel('mcow_tab_presence');
+      this.broadcastChannel.onmessage = (ev) => {
+        const msg = ev.data as { kind?: string; playerId?: string; tabNonce?: string };
+        if (msg?.kind === 'ping' && msg.playerId === this.playerId && msg.tabNonce !== this.tabNonce) {
+          this.broadcastChannel?.postMessage({
+            kind: 'pong',
+            playerId: this.playerId,
+            tabNonce: this.tabNonce,
+          });
+        }
+      };
+    } catch {
+      // ignore
+    }
+  }
+
   private async initIdentityAndConnect() {
-    // Preserve tab identity across refreshes
     let tabId = '';
     try {
       tabId = sessionStorage.getItem(SESSION_PLAYER_ID) || '';
@@ -67,19 +160,36 @@ export class MultiplayerClient {
       tabId = '';
     }
 
+    // Detect duplicated Chrome tabs that cloned sessionStorage
+    if (tabId && (await this.checkTabCollision(tabId))) {
+      tabId = '';
+    }
+
     if (tabId) {
       this.playerId = tabId;
       this.nickname = this.getStoredNickname(true);
+      this.setupPresenceChannel();
       this.connect();
       return;
     }
 
-    // Check if primary browser profile lock is available (prevents Tab 2 from kicking Tab 1)
+    // Check if primary browser profile lock is available (150ms timeout so WebViews never stall)
     let canUsePrimary = true;
     if (typeof navigator !== 'undefined' && navigator.locks) {
       canUsePrimary = await new Promise<boolean>((resolve) => {
+        let done = false;
+        const guard = window.setTimeout(() => {
+          if (!done) {
+            done = true;
+            resolve(true);
+          }
+        }, 150);
+
         navigator.locks
           .request('mcow_primary_profile_lock', { ifAvailable: true }, (lock) => {
+            if (done) return;
+            done = true;
+            clearTimeout(guard);
             if (!lock) {
               resolve(false);
               return;
@@ -90,15 +200,27 @@ export class MultiplayerClient {
               this.lockAbort.signal.addEventListener('abort', () => holdResolve());
             });
           })
-          .catch(() => resolve(true));
+          .catch(() => {
+            if (!done) {
+              done = true;
+              clearTimeout(guard);
+              resolve(true);
+            }
+          });
       });
     }
 
     if (this.closed) return;
 
     if (canUsePrimary) {
-      this.playerId = this.getOrCreateLocalId();
-      this.nickname = this.getStoredNickname(false);
+      const localId = this.getOrCreateLocalId();
+      if (await this.checkTabCollision(localId)) {
+        this.playerId = `p_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
+        this.nickname = `Oyinchi_${this.playerId.slice(-4).toUpperCase()}`;
+      } else {
+        this.playerId = localId;
+        this.nickname = this.getStoredNickname(false);
+      }
     } else {
       this.playerId = `p_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
       this.nickname = `Oyinchi_${this.playerId.slice(-4).toUpperCase()}`;
@@ -111,6 +233,7 @@ export class MultiplayerClient {
       // ignore
     }
 
+    this.setupPresenceChannel();
     this.connect();
   }
 
@@ -140,19 +263,69 @@ export class MultiplayerClient {
     return `Oyinchi_${this.playerId.slice(-4).toUpperCase()}`;
   }
 
+  private scheduleReconnect() {
+    if (this.closed || this.reconnectTimer !== null) return;
+    const delay = typeof navigator !== 'undefined' && !navigator.onLine ? 6000 : 3500;
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay);
+  }
+
   private connect() {
     if (this.closed) return;
+
+    // Immediately report offline when browser has no network instead of stalling on "Ulanmoqda..."
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      this.setConnState('offline');
+      this.scheduleReconnect();
+      return;
+    }
+
+    this.setConnState('connecting');
+    if (this.connectTimeoutTimer !== null) {
+      clearTimeout(this.connectTimeoutTimer);
+    }
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
-    const ws = new WebSocket(wsUrl);
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch {
+      this.setConnState('offline');
+      this.scheduleReconnect();
+      return;
+    }
     this.ws = ws;
 
+    // If handshake does not complete within 2.5s, fall back cleanly to offline-ready mode
+    this.connectTimeoutTimer = window.setTimeout(() => {
+      this.connectTimeoutTimer = null;
+      if (!this.closed && ws.readyState !== WebSocket.OPEN) {
+        this.setConnState('offline');
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+      }
+    }, 2500);
+
     ws.onopen = () => {
-      this.callbacks.onConnected(true);
+      if (this.connectTimeoutTimer !== null) {
+        clearTimeout(this.connectTimeoutTimer);
+        this.connectTimeoutTimer = null;
+      }
+      this.setConnState('online');
       ws.send(
         JSON.stringify({
           type: 'auth:hello',
-          payload: { playerId: this.playerId, nickname: this.nickname },
+          payload: {
+            playerId: this.playerId,
+            nickname: this.nickname,
+            tabNonce: this.tabNonce,
+          },
         }),
       );
       while (this.queue.length > 0) {
@@ -170,11 +343,19 @@ export class MultiplayerClient {
       }
 
       switch (msg.type) {
-        case 'auth:welcome':
-          this.callbacks.onWelcome(
-            msg.payload as Parameters<NetworkCallbacks['onWelcome']>[0],
-          );
+        case 'auth:welcome': {
+          const info = msg.payload as Parameters<NetworkCallbacks['onWelcome']>[0];
+          this.playerId = info.playerId;
+          this.nickname = info.nickname;
+          try {
+            sessionStorage.setItem(SESSION_PLAYER_ID, info.playerId);
+            sessionStorage.setItem(SESSION_NICKNAME, info.nickname);
+          } catch {
+            // ignore
+          }
+          this.callbacks.onWelcome(info);
           break;
+        }
         case 'servers:list':
           this.callbacks.onServerList(msg.payload as ServerRoomSummary[]);
           break;
@@ -227,21 +408,31 @@ export class MultiplayerClient {
       }
     };
 
-    ws.onclose = () => {
-      this.callbacks.onConnected(false);
-      if (!this.closed && !this.reconnectTimer) {
-        this.reconnectTimer = window.setTimeout(() => {
-          this.reconnectTimer = null;
-          this.connect();
-        }, 1800);
+    ws.onerror = () => {
+      if (this.connectTimeoutTimer !== null) {
+        clearTimeout(this.connectTimeoutTimer);
+        this.connectTimeoutTimer = null;
       }
+      this.setConnState('offline');
+    };
+
+    ws.onclose = () => {
+      if (this.connectTimeoutTimer !== null) {
+        clearTimeout(this.connectTimeoutTimer);
+        this.connectTimeoutTimer = null;
+      }
+      if (this.ws === ws) {
+        this.ws = null;
+      }
+      this.setConnState('offline');
+      this.scheduleReconnect();
     };
   }
 
   public send(type: string, payload: unknown) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type, payload }));
-    } else {
+    } else if (type === 'profile:update') {
       this.queue.push({ type, payload });
     }
   }
@@ -264,6 +455,7 @@ export class MultiplayerClient {
     preset: BiomePreset;
     seed: string;
     gameMode: GameMode;
+    maxPlayers?: number;
     isPublic: boolean;
   }) {
     this.send('room:create', opts);
@@ -278,21 +470,25 @@ export class MultiplayerClient {
   }
 
   public sendMove(state: Omit<RemotePlayerState, 'playerId' | 'nickname' | 'friendCode'>) {
+    if (!this.isConnected()) return;
     const now = performance.now();
-    if (now - this.lastMoveSent < 50) return; // 20Hz throttle
+    if (now - this.lastMoveSent < 50) return;
     this.lastMoveSent = now;
     this.send('player:move', state);
   }
 
   public sendSwing() {
+    if (!this.isConnected()) return;
     this.send('player:swing', {});
   }
 
   public sendBlockUpdate(x: number, y: number, z: number, block: BlockType) {
+    if (!this.isConnected()) return;
     this.send('block:update', { x, y, z, block });
   }
 
   public sendChat(text: string) {
+    if (!this.isConnected()) return;
     this.send('chat:send', { text });
   }
 
@@ -310,9 +506,16 @@ export class MultiplayerClient {
 
   public dispose() {
     this.closed = true;
+    window.removeEventListener('online', this.handleWindowOnline);
+    window.removeEventListener('offline', this.handleWindowOffline);
+    this.broadcastChannel?.close();
+    this.broadcastChannel = null;
     this.lockAbort?.abort();
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
+    }
+    if (this.connectTimeoutTimer !== null) {
+      clearTimeout(this.connectTimeoutTimer);
     }
     this.ws?.close();
     this.ws = null;

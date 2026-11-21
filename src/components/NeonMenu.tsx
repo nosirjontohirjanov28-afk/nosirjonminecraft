@@ -3,6 +3,7 @@ import {
   Check,
   Compass,
   Copy,
+  Download,
   Gamepad2,
   Globe,
   KeyRound,
@@ -21,9 +22,13 @@ import {
   Users,
   Volume2,
   VolumeX,
+  WifiOff,
   X,
 } from 'lucide-react';
 import { soundEngine } from '../engine/audio';
+import type { ConnectionState } from '../engine/network';
+import type { OfflineRoomRecord } from '../engine/offlineWorlds';
+import { usePWAInstall } from '../hooks/usePWAInstall';
 import {
   BiomePreset,
   GameMode,
@@ -38,11 +43,14 @@ import {
 interface NeonMenuProps {
   phase: GamePhase;
   wsConnected: boolean;
+  connectionState: ConnectionState;
   playerId: string;
   playerNickname: string;
   friendCode: string;
   currentRoom: ServerRoomSummary | null;
+  isOfflineRoom: boolean;
   servers: ServerRoomSummary[];
+  offlineWorlds: OfflineRoomRecord[];
   onlinePlayers: OnlinePlayerEntry[];
   social: SocialStatePayload;
   invites: ServerInviteEntry[];
@@ -55,9 +63,11 @@ interface NeonMenuProps {
     preset: BiomePreset;
     seed: string;
     gameMode: GameMode;
+    maxPlayers?: number;
     isPublic: boolean;
   }) => void;
   onJoinServer: (code: string) => void;
+  onPlayOffline: (code?: string) => void;
   onLeaveServer: () => void;
   onSendFriendRequest: (target: string) => void;
   onRespondFriendRequest: (requestId: string, accept: boolean) => void;
@@ -134,11 +144,14 @@ function SlotMeter({ count, max }: { count: number; max: number }) {
 export const NeonMenu: React.FC<NeonMenuProps> = ({
   phase,
   wsConnected,
+  connectionState,
   playerId,
   playerNickname,
   friendCode,
   currentRoom,
+  isOfflineRoom,
   servers,
+  offlineWorlds,
   onlinePlayers,
   social,
   invites,
@@ -148,6 +161,7 @@ export const NeonMenu: React.FC<NeonMenuProps> = ({
   onResumeGame,
   onCreateServer,
   onJoinServer,
+  onPlayOffline,
   onLeaveServer,
   onSendFriendRequest,
   onRespondFriendRequest,
@@ -162,10 +176,14 @@ export const NeonMenu: React.FC<NeonMenuProps> = ({
   const [serverPreset, setServerPreset] = useState<BiomePreset>('emerald-valley');
   const [serverSeed, setServerSeed] = useState('AETHER-404');
   const [serverGameMode, setServerGameMode] = useState<GameMode>('survival');
+  const [serverMaxPlayers, setServerMaxPlayers] = useState<number>(6);
   const [isPublicServer, setIsPublicServer] = useState(true);
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [friendTarget, setFriendTarget] = useState('');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [showIOSInstall, setShowIOSInstall] = useState(false);
+
+  const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
 
   useEffect(() => {
     setNickDraft(playerNickname);
@@ -211,6 +229,7 @@ export const NeonMenu: React.FC<NeonMenuProps> = ({
       preset: serverPreset,
       seed: serverSeed.trim() || 'AETHER-404',
       gameMode: serverGameMode,
+      maxPlayers: serverMaxPlayers,
       isPublic: isPublicServer,
     });
     setShowCreateForm(false);
@@ -235,13 +254,23 @@ export const NeonMenu: React.FC<NeonMenuProps> = ({
         {/* Top Brand + Profile Strip */}
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 pb-5 border-b border-sky-400/20">
           <div>
-            <div className="flex items-center gap-2.5 text-xs font-medium text-sky-400">
-              <span>{phase === 'paused' ? 'O‘yin pauzada' : 'Onlayn 3D Voxel Olam'}</span>
+            <div className="flex flex-wrap items-center gap-2.5 text-xs font-medium text-sky-400">
+              <span>{phase === 'paused' ? 'O‘yin pauzada' : 'Onlayn va Oflayn 3D Voxel Olam'}</span>
               <span aria-hidden="true">·</span>
-              <span className={wsConnected ? 'text-sky-300' : 'text-amber-300'}>
-                {wsConnected
-                  ? `Server ulangan (${onlinePlayers.length} onlayn)`
-                  : 'Ulanmoqda...'}
+              <span
+                className={
+                  connectionState === 'online'
+                    ? 'text-sky-300'
+                    : connectionState === 'offline'
+                      ? 'text-emerald-300'
+                      : 'text-sky-200'
+                }
+              >
+                {connectionState === 'online'
+                  ? `Onlayn tayyor (${onlinePlayers.length} o‘yinchi)`
+                  : connectionState === 'offline'
+                    ? 'Oflayn rejim · Internetsiz tayyor'
+                    : 'Tayyor · Server tekshirilmoqda'}
               </span>
             </div>
             <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-white neon-text-glow mt-0.5">
@@ -250,6 +279,30 @@ export const NeonMenu: React.FC<NeonMenuProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
+            {!isInstalled && isInstallable && (
+              <button
+                type="button"
+                onClick={() => {
+                  soundEngine.playMenuClick();
+                  void install();
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-500/20 border border-emerald-400/50 hover:bg-emerald-500/35 text-xs font-bold text-emerald-200 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Ilovani o‘rnatish (Internetsiz)
+              </button>
+            )}
+            {!isInstalled && !isInstallable && isIOS && (
+              <button
+                type="button"
+                onClick={() => setShowIOSInstall(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-500/20 border border-emerald-400/50 text-xs font-bold text-emerald-200 cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Download className="w-3.5 h-3.5" />
+                iPhone/iPad ga o‘rnatish
+              </button>
+            )}
+
             {/* Nickname & Friend Code */}
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#040d21] border border-sky-500/30">
               <input
@@ -280,7 +333,7 @@ export const NeonMenu: React.FC<NeonMenuProps> = ({
                 title="Do‘st kodingizni nusxalash"
                 className="inline-flex items-center gap-1 text-[11px] font-mono-tabular text-sky-300 hover:text-white cursor-pointer"
               >
-                <span>{friendCode || 'MCO-...'}</span>
+                <span>{friendCode || (wsConnected ? 'MCO-...' : 'OFLAYN')}</span>
                 {copiedKey === 'friend' ? (
                   <Check className="w-3 h-3 text-emerald-400" />
                 ) : (
@@ -302,20 +355,54 @@ export const NeonMenu: React.FC<NeonMenuProps> = ({
                 Davom etish ({currentRoom.code})
               </button>
             ) : (
-              <button
-                type="button"
-                onClick={() => {
-                  soundEngine.playMenuClick();
-                  onJoinServer('WORLD1');
-                }}
-                className="neon-button-primary inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl font-display font-bold text-sm text-white tracking-wide transition-transform active:scale-[0.98] whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <Play className="w-4 h-4 fill-current" />
-                Tezkor kirish
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    soundEngine.playMenuClick();
+                    if (wsConnected) onJoinServer('WORLD1');
+                    else onPlayOffline('WORLD1');
+                  }}
+                  className="neon-button-primary inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl font-display font-bold text-sm text-white tracking-wide transition-transform active:scale-[0.98] whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <Play className="w-4 h-4 fill-current" />
+                  {wsConnected ? 'Tezkor kirish' : 'Internetsiz o‘ynash'}
+                </button>
+                {wsConnected && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundEngine.playMenuClick();
+                      onPlayOffline('WORLD1');
+                    }}
+                    title="Internetsiz yolg‘iz o‘ynash"
+                    className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-[#040d21] border border-sky-400/35 hover:border-sky-300 text-xs font-semibold text-sky-200 hover:text-white whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <WifiOff className="w-3.5 h-3.5 text-sky-400" />
+                    Oflayn
+                  </button>
+                )}
+              </>
             )}
           </div>
         </div>
+
+        {showIOSInstall && (
+          <div className="mt-4 p-4 rounded-xl bg-emerald-950/50 border border-emerald-400/40 flex items-center justify-between gap-3">
+            <div className="text-xs text-emerald-100">
+              <strong>iPhone / iPad da internetsiz o‘ynash:</strong> Safari pastki panelidan{' '}
+              <strong>Ulashish (Share)</strong> tugmasini bosing va{' '}
+              <strong>Bosh ekranga qo‘shish (Add to Home Screen)</strong> ni tanlang.
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowIOSInstall(false)}
+              className="px-3 py-1 rounded-lg bg-[#040d21] text-xs font-semibold text-slate-200 cursor-pointer shrink-0"
+            >
+              Yopish
+            </button>
+          </div>
+        )}
 
         {/* Notice / Error Banner */}
         {notice && (
@@ -329,6 +416,43 @@ export const NeonMenu: React.FC<NeonMenuProps> = ({
             }`}
           >
             {notice.message}
+          </div>
+        )}
+
+        {/* Incoming Friend Requests visible on ALL menu tabs */}
+        {social.incomingRequests.length > 0 && (
+          <div className="mt-4 space-y-2">
+            {social.incomingRequests.map((req) => (
+              <div
+                key={req.id}
+                className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 rounded-xl bg-emerald-500/15 border border-emerald-400/50"
+              >
+                <div className="text-xs text-emerald-100">
+                  <strong>{req.fromName}</strong>{' '}
+                  <span className="font-mono-tabular text-emerald-300">({req.fromCode})</span>{' '}
+                  sizga do‘stlik tashladi!
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundEngine.playMenuClick();
+                      onRespondFriendRequest(req.id, true);
+                    }}
+                    className="px-3 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-xs font-bold text-slate-950 cursor-pointer"
+                  >
+                    Qabul qilish
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRespondFriendRequest(req.id, false)}
+                    className="px-3 py-1 rounded-lg bg-[#040d21] border border-slate-700 text-xs text-slate-300 hover:text-white cursor-pointer"
+                  >
+                    Rad etish
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
@@ -662,6 +786,20 @@ export const NeonMenu: React.FC<NeonMenuProps> = ({
                     >
                       <Lock className="w-3.5 h-3.5" /> Yopiq kodli
                     </button>
+                    {[6, 12, 30].map((cap) => (
+                      <button
+                        key={cap}
+                        type="button"
+                        onClick={() => setServerMaxPlayers(cap)}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border cursor-pointer ${
+                          serverMaxPlayers === cap
+                            ? 'bg-sky-500/20 border-sky-400 text-sky-200'
+                            : 'bg-[#07132a] border-slate-700 text-slate-400'
+                        }`}
+                      >
+                        {cap === 30 ? '30 joy (Katta)' : `${cap} joy`}
+                      </button>
+                    ))}
                   </div>
 
                   <button
@@ -674,70 +812,232 @@ export const NeonMenu: React.FC<NeonMenuProps> = ({
               </form>
             )}
 
-            {/* Public Servers List */}
-            <div>
-              <div className="flex items-center justify-between mb-2.5">
-                <span className="text-xs font-semibold text-sky-300/90">
-                  Ommaviy Onlayn Serverlar ({servers.length}) · Har bir serverda 6 ta joy
-                </span>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-56 overflow-y-auto pr-1">
-                {servers.map((srv) => {
-                  const isCurrent = currentRoom?.code === srv.code;
-                  const maxSlots = srv.maxPlayers || 6;
-                  const isFull = srv.playerCount >= maxSlots && !isCurrent;
-                  return (
-                    <div
-                      key={srv.code}
-                      className={`flex items-center justify-between gap-3 p-3.5 rounded-xl border ${
-                        isCurrent
-                          ? 'bg-sky-500/15 border-sky-400'
-                          : 'bg-[#040d21]/90 border-sky-500/20'
-                      }`}
-                    >
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-display font-bold text-sm text-white truncate">
-                            {srv.name}
-                          </span>
-                          <span className="font-mono-tabular text-[11px] text-sky-300">
-                            {srv.code}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2 text-[11px] text-slate-400 mt-1">
-                          <span>{srv.gameMode === 'creative' ? 'Kreativ' : 'Survival'}</span>
-                          <span aria-hidden="true">·</span>
-                          <span>{PRESET_LABELS[srv.preset] ?? srv.preset}</span>
-                          <span aria-hidden="true">·</span>
-                          <span className="font-mono-tabular text-sky-200">
-                            {srv.playerCount}/{maxSlots}
-                          </span>
-                          <SlotMeter count={srv.playerCount} max={maxSlots} />
-                        </div>
-                        <div className="text-[10px] text-slate-500 mt-0.5 truncate">
-                          Yaratuvchi: {srv.hostName}
-                        </div>
-                      </div>
+            {/* Public Servers + Offline Local Worlds List */}
+            <div className="space-y-4">
+              {wsConnected ? (
+                <>
+                  <div>
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+                      <span className="text-xs font-semibold text-sky-300/90">
+                        Ommaviy Onlayn Serverlar ({servers.length}) · Hohlagan serverga kiring
+                      </span>
                       <button
                         type="button"
-                        disabled={isFull}
-                        onClick={() => {
-                          soundEngine.playMenuClick();
-                          if (isCurrent) onResumeGame();
-                          else onJoinServer(srv.code);
-                        }}
-                        className={`px-3.5 py-1.5 rounded-lg border text-xs font-bold transition-colors shrink-0 ${
-                          isFull
-                            ? 'bg-[#07132a] border-slate-700 text-slate-500 cursor-not-allowed'
-                            : 'bg-sky-500/20 border-sky-400/50 hover:bg-sky-500 text-sky-200 hover:text-white cursor-pointer'
-                        }`}
+                        onClick={() => copyText('shareApp', buildInviteLink('WORLD1'))}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-500/15 border border-sky-400/40 text-[11px] font-semibold text-sky-200 hover:text-white cursor-pointer"
                       >
-                        {isCurrent ? 'Davom etish' : isFull ? 'To‘lgan (6/6)' : 'Kirish'}
+                        {copiedKey === 'shareApp' ? (
+                          <Check className="w-3 h-3 text-emerald-400" />
+                        ) : (
+                          <Link2 className="w-3 h-3" />
+                        )}
+                        {copiedKey === 'shareApp'
+                          ? 'O‘yin havolasi nusxalandi!'
+                          : 'Do‘stlarga o‘yin havolasini ulashish'}
                       </button>
                     </div>
-                  );
-                })}
-              </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-52 overflow-y-auto pr-1">
+                      {servers.map((srv) => {
+                        const isCurrent = currentRoom?.code === srv.code && !isOfflineRoom;
+                        const maxSlots = srv.maxPlayers || 6;
+                        const isFull = srv.playerCount >= maxSlots && !isCurrent;
+                        return (
+                          <div
+                            key={srv.code}
+                            className={`flex items-center justify-between gap-3 p-3.5 rounded-xl border ${
+                              isCurrent
+                                ? 'bg-sky-500/15 border-sky-400'
+                                : 'bg-[#040d21]/90 border-sky-500/20'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="font-display font-bold text-sm text-white truncate">
+                                  {srv.name}
+                                </span>
+                                <span className="font-mono-tabular text-[11px] text-sky-300">
+                                  {srv.code}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 text-[11px] text-slate-400 mt-1">
+                                <span>{srv.gameMode === 'creative' ? 'Kreativ' : 'Survival'}</span>
+                                <span aria-hidden="true">·</span>
+                                <span>{PRESET_LABELS[srv.preset] ?? srv.preset}</span>
+                                <span aria-hidden="true">·</span>
+                                <span className="font-mono-tabular text-sky-200">
+                                  {srv.playerCount}/{maxSlots}
+                                </span>
+                                {maxSlots <= 12 && (
+                                  <SlotMeter count={srv.playerCount} max={maxSlots} />
+                                )}
+                              </div>
+                              <div className="text-[10px] text-slate-500 mt-0.5 truncate">
+                                Yaratuvchi: {srv.hostName}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              disabled={isFull}
+                              onClick={() => {
+                                soundEngine.playMenuClick();
+                                if (isCurrent) onResumeGame();
+                                else onJoinServer(srv.code);
+                              }}
+                              className={`px-3.5 py-1.5 rounded-lg border text-xs font-bold transition-colors shrink-0 ${
+                                isFull
+                                  ? 'bg-[#07132a] border-slate-700 text-slate-500 cursor-not-allowed'
+                                  : 'bg-sky-500/20 border-sky-400/50 hover:bg-sky-500 text-sky-200 hover:text-white cursor-pointer'
+                              }`}
+                            >
+                              {isCurrent ? 'Davom etish' : isFull ? `To‘lgan (${maxSlots}/${maxSlots})` : 'Kirish'}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Live Online Players & Nicknames right on the Main Menu */}
+                  <div className="pt-3 border-t border-sky-500/20">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-semibold text-sky-300">
+                        Hozir onlayn o‘yinchilar ({onlinePlayers.length} ta · Sizdan tashqari{' '}
+                        {otherOnlinePlayers.length} ta)
+                      </span>
+                    </div>
+                    {otherOnlinePlayers.length === 0 ? (
+                      <div className="p-3 rounded-xl bg-[#040d21]/60 border border-sky-500/15 text-xs text-slate-400">
+                        Hozir faqat siz onlaynsiz (nikingiz: <strong className="text-white">{playerNickname}</strong>). Yuqoridagi havolani do‘stlaringizga yuboring — ular kirishi bilan shu yerda niki ko‘rinadi!
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-40 overflow-y-auto pr-1">
+                        {otherOnlinePlayers.map((op) => {
+                          const isFriend = friendIdSet.has(op.playerId);
+                          const isPendingOut = outgoingIdSet.has(op.playerId);
+                          const incomingReq = social.incomingRequests.find(
+                            (r) => r.fromId === op.playerId,
+                          );
+                          return (
+                            <div
+                              key={op.playerId}
+                              className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-[#040d21]/90 border border-sky-500/20"
+                            >
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="font-semibold text-xs text-white truncate">
+                                    {op.nickname}
+                                  </span>
+                                  <span className="font-mono-tabular text-[10px] text-sky-300">
+                                    {op.friendCode}
+                                  </span>
+                                </div>
+                                <div className="text-[10px] text-slate-400 truncate">
+                                  {op.roomCode ? `${op.roomName} (${op.roomCode})` : 'Menyuda'}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0">
+                                {incomingReq ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      soundEngine.playMenuClick();
+                                      onRespondFriendRequest(incomingReq.id, true);
+                                    }}
+                                    className="px-2 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-[10px] font-bold text-slate-950 cursor-pointer"
+                                  >
+                                    Qabul qilish
+                                  </button>
+                                ) : isFriend ? (
+                                  <span className="text-[10px] font-semibold text-emerald-400 px-1.5">
+                                    Do‘st
+                                  </span>
+                                ) : isPendingOut ? (
+                                  <span className="text-[10px] text-amber-300 px-1.5">Kutilmoqda</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      soundEngine.playMenuClick();
+                                      onSendFriendRequest(op.friendCode);
+                                    }}
+                                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-sky-500/20 border border-sky-400/50 hover:bg-sky-500 text-[10px] font-bold text-sky-200 hover:text-white cursor-pointer"
+                                  >
+                                    <UserPlus className="w-3 h-3" /> Do‘stlik
+                                  </button>
+                                )}
+                                {op.roomCode && op.roomCode !== currentRoom?.code && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      soundEngine.playMenuClick();
+                                      onJoinServer(op.roomCode!);
+                                    }}
+                                    className="px-2 py-1 rounded-lg bg-sky-500 hover:bg-sky-400 text-[10px] font-bold text-white cursor-pointer"
+                                  >
+                                    Kirish
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div>
+                  <div className="flex items-center justify-between mb-2.5">
+                    <span className="text-xs font-semibold text-emerald-300">
+                      Internetsiz Oflayn Olamlar ({offlineWorlds.length}) · Qurilmangizda saqlanadi
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-56 overflow-y-auto pr-1">
+                    {offlineWorlds.map((ow) => {
+                      const isCurrent = currentRoom?.code === ow.code && isOfflineRoom;
+                      return (
+                        <div
+                          key={ow.code}
+                          className={`flex items-center justify-between gap-3 p-3.5 rounded-xl border ${
+                            isCurrent
+                              ? 'bg-emerald-500/15 border-emerald-400'
+                              : 'bg-[#040d21]/90 border-sky-500/20'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-display font-bold text-sm text-white truncate">
+                                {ow.name}
+                              </span>
+                              <span className="font-mono-tabular text-[11px] text-emerald-300">
+                                {ow.code}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2 text-[11px] text-slate-400 mt-1">
+                              <span>{ow.gameMode === 'creative' ? 'Kreativ' : 'Survival'}</span>
+                              <span aria-hidden="true">·</span>
+                              <span>{PRESET_LABELS[ow.preset] ?? ow.preset}</span>
+                              <span aria-hidden="true">·</span>
+                              <span className="text-emerald-300">Oflayn</span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              soundEngine.playMenuClick();
+                              if (isCurrent) onResumeGame();
+                              else onPlayOffline(ow.code);
+                            }}
+                            className="px-3.5 py-1.5 rounded-lg border bg-emerald-500/20 border-emerald-400/50 hover:bg-emerald-500 text-xs font-bold text-emerald-200 hover:text-slate-950 transition-colors shrink-0 cursor-pointer"
+                          >
+                            {isCurrent ? 'Davom etish' : 'O‘ynash'}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}

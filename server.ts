@@ -36,6 +36,7 @@ interface StoredRoom {
   preset: BiomePreset;
   seed: string;
   gameMode?: GameMode;
+  maxPlayers?: number;
   isPublic: boolean;
   hostId: string;
   hostName: string;
@@ -52,6 +53,8 @@ interface PersistedData {
 
 interface ConnectedClient {
   ws: WebSocket;
+  tabNonce: string;
+  isAlive: boolean;
   playerId: string;
   nickname: string;
   friendCode: string;
@@ -86,6 +89,7 @@ function loadPersistedData() {
       preset: 'emerald-valley',
       seed: 'AETHER-404',
       gameMode: 'survival',
+      maxPlayers: 24,
       isPublic: true,
       hostId: 'system',
       hostName: 'Asosiy Server',
@@ -96,16 +100,21 @@ function loadPersistedData() {
           id: 'welcome-1',
           senderId: 'system',
           senderName: 'Server',
-          text: 'Markaziy Neon Olamga xush kelibsiz (Kod: WORLD1). 6 tagacha do‘st bilan Survival rejimda o‘ynang!',
+          text: 'Markaziy Neon Olamga xush kelibsiz (Kod: WORLD1). Do‘stlar bilan hohlagancha Survival rejimda o‘ynang!',
           timestamp: Date.now(),
           isSystem: true,
         },
       ],
     };
-  } else if (data.rooms['WORLD1'].name === 'Central Neon Hub') {
-    data.rooms['WORLD1'].name = 'Markaziy Neon Olam';
-    data.rooms['WORLD1'].hostName = 'Asosiy Server';
+  } else {
+    if (data.rooms['WORLD1'].name === 'Central Neon Hub') {
+      data.rooms['WORLD1'].name = 'Markaziy Neon Olam';
+      data.rooms['WORLD1'].hostName = 'Asosiy Server';
+    }
     if (!data.rooms['WORLD1'].gameMode) data.rooms['WORLD1'].gameMode = 'survival';
+    if (!data.rooms['WORLD1'].maxPlayers || data.rooms['WORLD1'].maxPlayers < 24) {
+      data.rooms['WORLD1'].maxPlayers = 24;
+    }
   }
 }
 
@@ -157,7 +166,11 @@ function getRoomPlayerCount(roomCode: string): number {
   return count;
 }
 
-const MAX_SERVER_PLAYERS = 6;
+const DEFAULT_ROOM_MAX_PLAYERS = 6;
+
+function getRoomMaxPlayers(room: StoredRoom): number {
+  return room.maxPlayers && room.maxPlayers > 0 ? room.maxPlayers : DEFAULT_ROOM_MAX_PLAYERS;
+}
 
 function toRoomSummary(room: StoredRoom): ServerRoomSummary {
   return {
@@ -170,7 +183,7 @@ function toRoomSummary(room: StoredRoom): ServerRoomSummary {
     hostId: room.hostId,
     hostName: room.hostName,
     playerCount: getRoomPlayerCount(room.code),
-    maxPlayers: MAX_SERVER_PLAYERS,
+    maxPlayers: getRoomMaxPlayers(room),
     createdAt: room.createdAt,
   };
 }
@@ -290,18 +303,48 @@ function leaveCurrentRoom(client: ConnectedClient) {
 }
 
 function joinRoom(client: ConnectedClient, rawCode: string) {
-  const code = rawCode.trim().toUpperCase();
-  const room = data.rooms[code];
+  let code = rawCode.trim().toUpperCase();
+  let room = data.rooms[code];
   if (!room) {
     sendJson(client.ws, 'error', { message: `"${code}" kodli server topilmadi.` });
     return;
   }
 
-  if (client.roomCode !== code && getRoomPlayerCount(code) >= MAX_SERVER_PLAYERS) {
-    sendJson(client.ws, 'error', {
-      message: `Server to‘lgan (${MAX_SERVER_PLAYERS}/${MAX_SERVER_PLAYERS} joy band). Boshqa serverga kiring yoki yangisini yarating.`,
-    });
-    return;
+  let cap = getRoomMaxPlayers(room);
+  if (client.roomCode !== code && getRoomPlayerCount(code) >= cap) {
+    // If joining the main hub WORLD1 and it happens to be full, auto-open an overflow hub so nobody is blocked
+    if (code === 'WORLD1') {
+      let idx = 2;
+      while (data.rooms[`WORLD${idx}`] && getRoomPlayerCount(`WORLD${idx}`) >= getRoomMaxPlayers(data.rooms[`WORLD${idx}`])) {
+        idx++;
+      }
+      const overflowCode = `WORLD${idx}`;
+      if (!data.rooms[overflowCode]) {
+        data.rooms[overflowCode] = {
+          code: overflowCode,
+          name: `Markaziy Neon Olam #${idx}`,
+          preset: 'emerald-valley',
+          seed: `AETHER-${400 + idx}`,
+          gameMode: 'survival',
+          maxPlayers: 24,
+          isPublic: true,
+          hostId: 'system',
+          hostName: 'Asosiy Server',
+          createdAt: Date.now(),
+          edits: {},
+          chat: [],
+        };
+        scheduleSave();
+      }
+      code = overflowCode;
+      room = data.rooms[code];
+      cap = getRoomMaxPlayers(room);
+    } else {
+      sendJson(client.ws, 'error', {
+        message: `Server to‘lgan (${cap}/${cap} joy band). Boshqa serverga kiring yoki yangisini yarating.`,
+      });
+      return;
+    }
   }
 
   if (client.roomCode === code) {
@@ -358,12 +401,41 @@ async function startServer() {
   });
 
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: '/ws' });
+  const wss = new WebSocketServer({ noServer: true });
+
+  server.on('upgrade', (req, socket, head) => {
+    const pathname = (req.url || '').split('?')[0];
+    if (pathname === '/ws') {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit('connection', ws, req);
+      });
+    }
+  });
+
+  // Heartbeat keepalive so proxies don't drop idle sockets and dead clients clear promptly
+  const heartbeat = setInterval(() => {
+    for (const client of clients.values()) {
+      if (!client.isAlive) {
+        client.ws.terminate();
+        continue;
+      }
+      client.isAlive = false;
+      if (client.ws.readyState === WebSocket.OPEN) {
+        client.ws.ping();
+      }
+    }
+  }, 20000);
+  wss.on('close', () => clearInterval(heartbeat));
 
   wss.on('connection', (ws) => {
     let currentClient: ConnectedClient | null = null;
 
+    ws.on('pong', () => {
+      if (currentClient) currentClient.isAlive = true;
+    });
+
     ws.on('message', (raw) => {
+      if (currentClient) currentClient.isAlive = true;
       let msg: { type?: string; payload?: Record<string, unknown> };
       try {
         msg = JSON.parse(String(raw));
@@ -375,10 +447,27 @@ async function startServer() {
       const payload = msg.payload || {};
 
       if (type === 'auth:hello') {
-        const requestedId = typeof payload.playerId === 'string' && payload.playerId.trim()
-          ? payload.playerId.trim()
-          : `p_${Math.random().toString(36).slice(2, 10)}`;
+        const tabNonce =
+          typeof payload.tabNonce === 'string' && payload.tabNonce.trim()
+            ? payload.tabNonce.trim()
+            : `t_${Math.random().toString(36).slice(2, 8)}`;
+        let requestedId =
+          typeof payload.playerId === 'string' && payload.playerId.trim()
+            ? payload.playerId.trim()
+            : `p_${Math.random().toString(36).slice(2, 10)}`;
         const rawNick = typeof payload.nickname === 'string' ? payload.nickname.trim() : '';
+
+        // If another live tab/device accidentally collided on the same playerId, fork a fresh ID
+        // instead of kicking the active player into an "Ulanmoqda..." reconnect loop!
+        const existing = clients.get(requestedId);
+        if (existing && existing.ws !== ws) {
+          if (existing.ws.readyState === WebSocket.OPEN && existing.tabNonce !== tabNonce) {
+            requestedId = `p_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-3)}`;
+          } else {
+            existing.ws.close();
+          }
+        }
+
         const nickname = (rawNick || `Oyinchi_${requestedId.slice(-4).toUpperCase()}`).slice(0, 20);
 
         let user = data.users[requestedId];
@@ -399,14 +488,10 @@ async function startServer() {
         }
         scheduleSave();
 
-        // Replace previous socket for same playerId if reconnecting
-        const existing = clients.get(requestedId);
-        if (existing && existing.ws !== ws) {
-          existing.ws.close();
-        }
-
         currentClient = {
           ws,
+          tabNonce,
+          isAlive: true,
           playerId: user.playerId,
           nickname: user.nickname,
           friendCode: user.friendCode,
@@ -466,6 +551,8 @@ async function startServer() {
         const preset = (payload.preset as BiomePreset) || 'emerald-valley';
         const seed = (typeof payload.seed === 'string' ? payload.seed.trim() : '') || `SEED-${Math.floor(100 + Math.random() * 899)}`;
         const gameMode: GameMode = payload.gameMode === 'creative' ? 'creative' : 'survival';
+        const reqMax = Number(payload.maxPlayers);
+        const maxPlayers = [6, 12, 30].includes(reqMax) ? reqMax : DEFAULT_ROOM_MAX_PLAYERS;
         const isPublic = payload.isPublic !== false;
         const code = generateServerCode();
 
@@ -475,6 +562,7 @@ async function startServer() {
           preset,
           seed: seed.slice(0, 24),
           gameMode,
+          maxPlayers,
           isPublic,
           hostId: currentClient.playerId,
           hostName: currentClient.nickname,
@@ -582,18 +670,33 @@ async function startServer() {
         const query = typeof payload.target === 'string' ? payload.target.trim().toUpperCase() : '';
         if (!query) return;
 
-        const targetUser = Object.values(data.users).find(
-          (u) =>
-            u.playerId !== currentClient!.playerId &&
-            (u.friendCode.toUpperCase() === query ||
-              u.nickname.toUpperCase() === query ||
-              u.playerId.toUpperCase() === query),
-        );
+        // Prioritize live connected online players first, then stored users
+        let targetUser: StoredUser | undefined;
+        for (const c of clients.values()) {
+          if (c.playerId === currentClient!.playerId) continue;
+          if (
+            c.friendCode.toUpperCase() === query ||
+            c.nickname.toUpperCase() === query ||
+            c.playerId.toUpperCase() === query
+          ) {
+            targetUser = data.users[c.playerId];
+            break;
+          }
+        }
+        if (!targetUser) {
+          targetUser = Object.values(data.users).find(
+            (u) =>
+              u.playerId !== currentClient!.playerId &&
+              (u.friendCode.toUpperCase() === query ||
+                u.nickname.toUpperCase() === query ||
+                u.playerId.toUpperCase() === query),
+          );
+        }
 
         if (!targetUser) {
           sendJson(ws, 'social:notice', {
             kind: 'error',
-            message: `"${query}" bo‘yicha o‘yinchi topilmadi. Do‘st kodi (MCO-XXXX) yoki ismini tekshiring.`,
+            message: `"${query}" bo‘yicha o‘yinchi topilmadi. O‘yinchining niki yoki kodini (MCO-XXXX) tekshiring.`,
           });
           return;
         }
@@ -622,6 +725,13 @@ async function startServer() {
             kind: 'success',
             message: `Siz va ${targetUser.nickname} endi do‘st bo‘ldingiz!`,
           });
+          const targetClient = clients.get(targetUser.playerId);
+          if (targetClient) {
+            sendJson(targetClient.ws, 'social:notice', {
+              kind: 'success',
+              message: `${currentClient.nickname} bilan do‘st bo‘ldingiz!`,
+            });
+          }
           return;
         }
 
@@ -650,6 +760,14 @@ async function startServer() {
         scheduleSave();
         pushSocialUpdate(currentClient.playerId);
         pushSocialUpdate(targetUser.playerId);
+
+        const targetClient = clients.get(targetUser.playerId);
+        if (targetClient) {
+          sendJson(targetClient.ws, 'social:notice', {
+            kind: 'info',
+            message: `${currentClient.nickname} (${currentClient.friendCode}) sizga do‘stlik tashladi!`,
+          });
+        }
 
         sendJson(ws, 'social:notice', {
           kind: 'success',
@@ -702,10 +820,11 @@ async function startServer() {
           });
           return;
         }
-        if (getRoomPlayerCount(room.code) >= MAX_SERVER_PLAYERS) {
+        const cap = getRoomMaxPlayers(room);
+        if (getRoomPlayerCount(room.code) >= cap) {
           sendJson(ws, 'social:notice', {
             kind: 'error',
-            message: `Serverda bo‘sh joy qolmadi (${MAX_SERVER_PLAYERS}/${MAX_SERVER_PLAYERS}).`,
+            message: `Serverda bo‘sh joy qolmadi (${cap}/${cap}).`,
           });
           return;
         }
@@ -740,8 +859,13 @@ async function startServer() {
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await import('vite');
+    const hmrDisabled = process.env.DISABLE_HMR === 'true';
     const viteServer = await vite.createServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        ws: { server },
+        hmr: hmrDisabled ? false : { server },
+      },
       appType: 'spa',
     });
     app.use(viteServer.middlewares);

@@ -28,17 +28,23 @@ import {
   ITEM_DEFINITIONS,
   InventorySlot,
   ItemId,
+  OnlinePlayerEntry,
   PlayerHudState,
   RemotePlayerState,
   ServerInviteEntry,
   ServerRoomSummary,
+  SocialStatePayload,
 } from '../types/game';
 
 interface GameHUDProps {
   hud: PlayerHudState;
+  wsConnected: boolean;
+  playerId: string;
   currentRoom: ServerRoomSummary | null;
   friendCode: string;
   remotePlayers: RemotePlayerState[];
+  onlinePlayers: OnlinePlayerEntry[];
+  social: SocialStatePayload;
   friendIds: Set<string>;
   chatMessages: ChatMessage[];
   invites: ServerInviteEntry[];
@@ -56,6 +62,8 @@ interface GameHUDProps {
   onSendChat: (text: string) => void;
   onChatActiveChange: (active: boolean) => void;
   onAddFriend: (target: string) => void;
+  onRespondFriendRequest: (requestId: string, accept: boolean) => void;
+  onInviteFriend: (friendId: string) => void;
   onJoinServer: (code: string) => void;
   onDismissInvite: (id: string) => void;
   onVirtualKey: (code: string, down: boolean) => void;
@@ -65,9 +73,13 @@ interface GameHUDProps {
 
 export const GameHUD: React.FC<GameHUDProps> = ({
   hud,
+  wsConnected,
+  playerId,
   currentRoom,
   friendCode,
   remotePlayers,
+  onlinePlayers,
+  social,
   friendIds,
   chatMessages,
   invites,
@@ -85,6 +97,8 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   onSendChat,
   onChatActiveChange,
   onAddFriend,
+  onRespondFriendRequest,
+  onInviteFriend,
   onJoinServer,
   onDismissInvite,
   onVirtualKey,
@@ -235,7 +249,9 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             <span>{hud.isFlying ? 'Uchish' : hud.isInWater ? 'Suzish' : 'Yurish'}</span>
             <span aria-hidden="true">·</span>
             <span className="font-mono-tabular text-sky-300">
-              {currentPlayersCount}/{maxSlots} o‘yinchi
+              {wsConnected
+                ? `${currentPlayersCount}/${maxSlots} o‘yinchi`
+                : 'Oflayn (Saqlanadi)'}
             </span>
           </div>
         </div>
@@ -340,39 +356,66 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         </div>
       </div>
 
-      {/* Incoming Friend Invite Toast while in-game */}
-      {invites.length > 0 && (
-        <div className="pointer-events-auto fixed top-20 left-1/2 -translate-x-1/2 neon-panel rounded-xl px-4 py-2.5 flex items-center gap-3">
-          <span className="text-xs text-sky-100">
-            <strong>{invites[0].fromName}</strong> sizni{' '}
-            <strong>{invites[0].roomName}</strong> ({invites[0].roomCode}) serveriga taklif qildi
-          </span>
-          <button
-            type="button"
-            onClick={() => {
-              onJoinServer(invites[0].roomCode);
-              onDismissInvite(invites[0].id);
-            }}
-            className="px-2.5 py-1 rounded-lg bg-sky-500 text-xs font-bold text-white cursor-pointer"
-          >
-            Qo‘shilish
-          </button>
-          <button
-            type="button"
-            onClick={() => onDismissInvite(invites[0].id)}
-            className="text-slate-400 hover:text-white cursor-pointer"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
+      {/* Incoming Friend Request or Server Invite Toast while in-game */}
+      {(social.incomingRequests.length > 0 || invites.length > 0) && (
+        <div className="pointer-events-auto fixed top-20 left-1/2 -translate-x-1/2 flex flex-col gap-2 items-center z-30">
+          {social.incomingRequests.length > 0 && (
+            <div className="neon-panel rounded-xl px-4 py-2.5 flex items-center gap-3 border-emerald-400/50">
+              <span className="text-xs text-emerald-100">
+                <strong>{social.incomingRequests[0].fromName}</strong> (
+                {social.incomingRequests[0].fromCode}) sizga do‘stlik tashladi!
+              </span>
+              <button
+                type="button"
+                onClick={() => onRespondFriendRequest(social.incomingRequests[0].id, true)}
+                className="px-2.5 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-xs font-bold text-slate-950 cursor-pointer"
+              >
+                Qabul qilish
+              </button>
+              <button
+                type="button"
+                onClick={() => onRespondFriendRequest(social.incomingRequests[0].id, false)}
+                className="px-2 py-1 rounded-lg bg-[#040d21] text-xs text-slate-300 hover:text-white cursor-pointer"
+              >
+                Rad etish
+              </button>
+            </div>
+          )}
+
+          {invites.length > 0 && (
+            <div className="neon-panel rounded-xl px-4 py-2.5 flex items-center gap-3">
+              <span className="text-xs text-sky-100">
+                <strong>{invites[0].fromName}</strong> sizni{' '}
+                <strong>{invites[0].roomName}</strong> ({invites[0].roomCode}) serveriga taklif qildi
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  onJoinServer(invites[0].roomCode);
+                  onDismissInvite(invites[0].id);
+                }}
+                className="px-2.5 py-1 rounded-lg bg-sky-500 text-xs font-bold text-white cursor-pointer"
+              >
+                Qo‘shilish
+              </button>
+              <button
+                type="button"
+                onClick={() => onDismissInvite(invites[0].id)}
+                className="text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Server Players & Quick Add Friend Popover */}
+      {/* Server Players & All Online Players Popover */}
       {playersOpen && (
-        <div className="pointer-events-auto fixed top-20 right-4 w-80 neon-panel rounded-2xl p-4 space-y-3">
+        <div className="pointer-events-auto fixed top-20 right-4 w-88 max-w-[92vw] neon-panel rounded-2xl p-4 space-y-3 z-30">
           <div className="flex items-center justify-between">
             <span className="font-display text-sm font-bold text-sky-200">
-              Serverdagi o‘yinchilar ({currentPlayersCount}/{maxSlots})
+              O‘yinchilar ({currentPlayersCount}/{maxSlots}) · {onlinePlayers.length} onlayn
             </span>
             <button
               type="button"
@@ -402,16 +445,21 @@ export const GameHUD: React.FC<GameHUDProps> = ({
 
           {remotePlayers.length === 0 ? (
             <p className="text-xs text-slate-400">
-              Hozircha bu serverda faqat siz borsiz ({maxSlots} ta joydan 1 tasi band). Kod{' '}
+              Hozircha bu serverda faqat siz borsiz. Kod{' '}
               <span className="font-mono-tabular text-sky-300 font-semibold">
                 {currentRoom?.code}
               </span>{' '}
               ni do‘stlaringizga yuboring!
             </p>
           ) : (
-            <div className="space-y-2 max-h-56 overflow-y-auto">
+            <div className="space-y-1.5 max-h-40 overflow-y-auto">
+              <div className="text-[10px] font-semibold text-sky-300/80 uppercase">
+                Shu olamdagi o‘yinchilar
+              </div>
               {remotePlayers.map((rp) => {
                 const isFriend = friendIds.has(rp.playerId);
+                const incoming = social.incomingRequests.find((r) => r.fromId === rp.playerId);
+                const outgoing = social.outgoingRequests.some((r) => r.toId === rp.playerId);
                 return (
                   <div
                     key={rp.playerId}
@@ -426,21 +474,77 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                       </div>
                     </div>
                     {isFriend ? (
-                      <span className="text-[11px] font-semibold text-emerald-400">
-                        Do‘st
-                      </span>
+                      <span className="text-[11px] font-semibold text-emerald-400">Do‘st</span>
+                    ) : incoming ? (
+                      <button
+                        type="button"
+                        onClick={() => onRespondFriendRequest(incoming.id, true)}
+                        className="px-2.5 py-1 rounded-lg bg-emerald-500 text-[11px] font-bold text-slate-950 cursor-pointer"
+                      >
+                        Qabul qilish
+                      </button>
+                    ) : outgoing ? (
+                      <span className="text-[10px] text-amber-300">Kutilmoqda</span>
                     ) : (
                       <button
                         type="button"
                         onClick={() => onAddFriend(rp.friendCode)}
                         className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-sky-500/20 border border-sky-400/50 hover:bg-sky-500 text-[11px] font-bold text-sky-200 hover:text-white cursor-pointer"
                       >
-                        <UserPlus className="w-3 h-3" /> Do‘st qo‘shish
+                        <UserPlus className="w-3 h-3" /> Do‘stlik
                       </button>
                     )}
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {onlinePlayers.filter((p) => p.playerId !== playerId && p.roomCode !== currentRoom?.code).length > 0 && (
+            <div className="space-y-1.5 pt-2 border-t border-sky-500/20 max-h-40 overflow-y-auto">
+              <div className="text-[10px] font-semibold text-sky-300/80 uppercase">
+                Boshqa onlayn o‘yinchilar
+              </div>
+              {onlinePlayers
+                .filter((p) => p.playerId !== playerId && p.roomCode !== currentRoom?.code)
+                .map((op) => {
+                  const isFriend = friendIds.has(op.playerId);
+                  return (
+                    <div
+                      key={op.playerId}
+                      className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-[#040d21] border border-sky-500/15"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-white truncate">
+                          {op.nickname}
+                        </div>
+                        <div className="text-[10px] text-slate-400 truncate">
+                          {op.roomCode ? `${op.roomName} (${op.roomCode})` : 'Menyuda'}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {!isFriend && (
+                          <button
+                            type="button"
+                            onClick={() => onAddFriend(op.friendCode)}
+                            className="px-2 py-1 rounded bg-sky-500/20 border border-sky-400/40 text-[10px] font-bold text-sky-200 hover:text-white cursor-pointer"
+                          >
+                            + Do‘st
+                          </button>
+                        )}
+                        {currentRoom && (
+                          <button
+                            type="button"
+                            onClick={() => onInviteFriend(op.playerId)}
+                            className="px-2 py-1 rounded bg-sky-500 text-[10px] font-bold text-white cursor-pointer"
+                          >
+                            Taklif
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
             </div>
           )}
         </div>

@@ -8,7 +8,18 @@ import { NeonMenu } from './components/NeonMenu';
 import { SurvivalModal } from './components/SurvivalModal';
 import { GameEngine } from './engine/GameEngine';
 import { MobDrop } from './engine/mobs';
-import { MultiplayerClient } from './engine/network';
+import { ConnectionState, MultiplayerClient } from './engine/network';
+import {
+  OfflineRoomRecord,
+  createOfflineRoom,
+  getOfflineRoomByCode,
+  loadCachedServers,
+  loadOfflineBlockEdits,
+  loadOfflineRooms,
+  saveCachedServers,
+} from './engine/offlineWorlds';
+import { saveOfflineBlockEdit } from './engine/offlineWorlds';
+import { useOnlineStatus } from './hooks/useOnlineStatus';
 import {
   BiomePreset,
   BlockType,
@@ -110,6 +121,7 @@ export default function App() {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<GameEngine | null>(null);
   const netRef = useRef<MultiplayerClient | null>(null);
+  const browserOnline = useOnlineStatus();
 
   const [phase, setPhase] = useState<GamePhase>('menu');
   const [settings, setSettings] = useState<GameSettings>(INITIAL_SETTINGS);
@@ -131,11 +143,16 @@ export default function App() {
 
   // Multiplayer & Social state
   const [wsConnected, setWsConnected] = useState(false);
+  const [connectionState, setConnectionState] = useState<ConnectionState>(
+    typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'connecting',
+  );
   const [playerId, setPlayerId] = useState('');
   const [playerNickname, setPlayerNickname] = useState('Oyinchi');
   const [friendCode, setFriendCode] = useState('');
   const [currentRoom, setCurrentRoom] = useState<ServerRoomSummary | null>(null);
-  const [servers, setServers] = useState<ServerRoomSummary[]>([]);
+  const [isOfflineRoom, setIsOfflineRoom] = useState(false);
+  const [servers, setServers] = useState<ServerRoomSummary[]>(() => loadCachedServers());
+  const [offlineWorlds, setOfflineWorlds] = useState<OfflineRoomRecord[]>(() => loadOfflineRooms());
   const [onlinePlayers, setOnlinePlayers] = useState<OnlinePlayerEntry[]>([]);
   const [remotePlayers, setRemotePlayers] = useState<RemotePlayerState[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -172,6 +189,8 @@ export default function App() {
   gameModeRef.current = gameMode;
   const currentRoomRef = useRef(currentRoom);
   currentRoomRef.current = currentRoom;
+  const isOfflineRoomRef = useRef(isOfflineRoom);
+  isOfflineRoomRef.current = isOfflineRoom;
 
   const syncEngineHeldItem = useCallback((slotIdx: number, mode: GameMode) => {
     const slots = mode === 'creative' ? creativeSlotsRef.current : survivalInvRef.current;
@@ -179,20 +198,17 @@ export default function App() {
     engineRef.current?.setSelectedItem(slot ? slot.itemId : null);
   }, []);
 
-  const updateSurvivalInventory = useCallback(
-    (next: Array<InventorySlot | null>) => {
-      survivalInvRef.current = next;
-      setSurvivalInventory(next);
-      if (currentRoomRef.current) {
-        saveRoomInventory(currentRoomRef.current.code, next);
-      }
-      if (gameModeRef.current === 'survival') {
-        const cur = next[selectedSlotRef.current] ?? null;
-        engineRef.current?.setSelectedItem(cur ? cur.itemId : null);
-      }
-    },
-    [],
-  );
+  const updateSurvivalInventory = useCallback((next: Array<InventorySlot | null>) => {
+    survivalInvRef.current = next;
+    setSurvivalInventory(next);
+    if (currentRoomRef.current) {
+      saveRoomInventory(currentRoomRef.current.code, next);
+    }
+    if (gameModeRef.current === 'survival') {
+      const cur = next[selectedSlotRef.current] ?? null;
+      engineRef.current?.setSelectedItem(cur ? cur.itemId : null);
+    }
+  }, []);
 
   const showNotice = useCallback(
     (next: { kind: 'info' | 'success' | 'error'; message: string }) => {
@@ -202,6 +218,42 @@ export default function App() {
       }, 4500);
     },
     [],
+  );
+
+  const launchOfflineRoom = useCallback(
+    (room: OfflineRoomRecord) => {
+      const engine = engineRef.current;
+      if (!engine) return;
+      const mode: GameMode = room.gameMode || 'survival';
+      setIsOfflineRoom(true);
+      isOfflineRoomRef.current = true;
+      setCurrentRoom(room);
+      currentRoomRef.current = room;
+      gameModeRef.current = mode;
+
+      const roomInv = loadRoomInventory(room.code);
+      survivalInvRef.current = roomInv;
+      setSurvivalInventory(roomInv);
+
+      const edits = loadOfflineBlockEdits(room.code);
+      setRemotePlayers([]);
+      setChatMessages([
+        {
+          id: `offline-${Date.now()}`,
+          senderId: 'system',
+          senderName: 'Oflayn Olam',
+          text: `"${room.name}" oflayn rejimda ochildi. Barcha qurilgan bloklar va inventar qurilmangizda saqlanadi.`,
+          timestamp: Date.now(),
+          isSystem: true,
+        },
+      ]);
+
+      engine.loadMultiplayerRoom(room.seed, room.preset, edits, [], mode);
+      syncEngineHeldItem(selectedSlotRef.current, mode);
+      engine.setPhase('playing');
+      engine.requestLock();
+    },
+    [syncEngineHeldItem],
   );
 
   // Sync engine input lock when chat or crafting modal opens/closes
@@ -236,13 +288,24 @@ export default function App() {
         },
         onContextLost: (lost) => setContextLost(lost),
         onLocalMove: (moveState) => {
-          netRef.current?.sendMove(moveState);
+          if (!isOfflineRoomRef.current) {
+            netRef.current?.sendMove(moveState);
+          }
         },
         onLocalBlockUpdate: (x, y, z, block) => {
-          netRef.current?.sendBlockUpdate(x, y, z, block);
+          const activeRoom = currentRoomRef.current;
+          if (isOfflineRoomRef.current || !netRef.current?.isConnected()) {
+            if (activeRoom) {
+              saveOfflineBlockEdit(activeRoom.code, x, y, z, block);
+            }
+          } else {
+            netRef.current.sendBlockUpdate(x, y, z, block);
+          }
         },
         onLocalSwing: () => {
-          netRef.current?.sendSwing();
+          if (!isOfflineRoomRef.current) {
+            netRef.current?.sendSwing();
+          }
         },
         onCollectDrops: (drops: MobDrop[]) => {
           const next = survivalInvRef.current.map((s) => (s ? { ...s } : null));
@@ -309,11 +372,13 @@ export default function App() {
 
     const net = new MultiplayerClient({
       onConnected: (connected) => setWsConnected(connected),
+      onConnectionStateChange: (state) => setConnectionState(state),
       onWelcome: (info) => {
         setPlayerId(info.playerId);
         setPlayerNickname(info.nickname);
         setFriendCode(info.friendCode);
         setServers(info.servers);
+        saveCachedServers(info.servers);
         setOnlinePlayers(info.onlinePlayers);
         setSocial(info.social);
 
@@ -335,12 +400,17 @@ export default function App() {
           }
         }
       },
-      onServerList: (list) => setServers(list),
+      onServerList: (list) => {
+        setServers(list);
+        saveCachedServers(list);
+      },
       onOnlinePlayers: (players) => setOnlinePlayers(players),
       onSocialUpdate: (s) => setSocial(s),
       onNotice: (n) => showNotice(n),
       onRoomInit: (payload) => {
         const mode: GameMode = payload.room.gameMode || 'survival';
+        setIsOfflineRoom(false);
+        isOfflineRoomRef.current = false;
         setCurrentRoom(payload.room);
         currentRoomRef.current = payload.room;
         gameModeRef.current = mode;
@@ -430,19 +500,55 @@ export default function App() {
       preset: BiomePreset;
       seed: string;
       gameMode: GameMode;
+      maxPlayers?: number;
       isPublic: boolean;
     }) => {
-      netRef.current?.createServer(opts);
+      if (netRef.current?.isConnected()) {
+        netRef.current.createServer(opts);
+        return;
+      }
+      // Instant offline world creation when internetsiz / offline
+      const created = createOfflineRoom({
+        name: opts.name,
+        preset: opts.preset,
+        seed: opts.seed,
+        gameMode: opts.gameMode,
+        hostName: playerNickname,
+      });
+      setOfflineWorlds(loadOfflineRooms());
+      launchOfflineRoom(created);
     },
-    [],
+    [launchOfflineRoom, playerNickname],
   );
 
-  const handleJoinServer = useCallback((code: string) => {
-    netRef.current?.joinServer(code);
-  }, []);
+  const handleJoinServer = useCallback(
+    (code: string) => {
+      const clean = code.trim().toUpperCase();
+      if (!clean) return;
+      if (clean.startsWith('OFF-') || !netRef.current?.isConnected()) {
+        const offlineRoom = getOfflineRoomByCode(clean);
+        launchOfflineRoom(offlineRoom);
+        return;
+      }
+      netRef.current.joinServer(clean);
+    },
+    [launchOfflineRoom],
+  );
+
+  const handlePlayOffline = useCallback(
+    (code = 'WORLD1') => {
+      const offlineRoom = getOfflineRoomByCode(code);
+      launchOfflineRoom(offlineRoom);
+    },
+    [launchOfflineRoom],
+  );
 
   const handleLeaveServer = useCallback(() => {
-    netRef.current?.leaveServer();
+    if (!isOfflineRoomRef.current) {
+      netRef.current?.leaveServer();
+    }
+    setIsOfflineRoom(false);
+    isOfflineRoomRef.current = false;
     setCurrentRoom(null);
     setRemotePlayers([]);
     setChatMessages([]);
@@ -493,10 +599,10 @@ export default function App() {
       currentRoom
         ? {
             ...currentRoom,
-            playerCount: remotePlayers.length + 1,
+            playerCount: isOfflineRoom ? 1 : remotePlayers.length + 1,
           }
         : null,
-    [currentRoom, remotePlayers.length],
+    [currentRoom, isOfflineRoom, remotePlayers.length],
   );
 
   const activeHotbarSlots =
@@ -523,9 +629,13 @@ export default function App() {
       {phase === 'playing' && (
         <GameHUD
           hud={hud}
+          wsConnected={wsConnected && !isOfflineRoom}
+          playerId={playerId}
           currentRoom={liveRoom}
           friendCode={friendCode}
           remotePlayers={remotePlayers}
+          onlinePlayers={onlinePlayers}
+          social={social}
           friendIds={friendIds}
           chatMessages={chatMessages}
           invites={invites}
@@ -544,9 +654,29 @@ export default function App() {
           onToggleCamera={() => engineRef.current?.toggleCameraMode()}
           onToggleFly={() => engineRef.current?.toggleFlyMode()}
           onOpenMenu={() => engineRef.current?.setPhase('paused')}
-          onSendChat={(text) => netRef.current?.sendChat(text)}
+          onSendChat={(text) => {
+            if (isOfflineRoomRef.current || !netRef.current?.isConnected()) {
+              setChatMessages((prev) => [
+                ...prev.slice(-49),
+                {
+                  id: `local-${Date.now()}`,
+                  senderId: 'system',
+                  senderName: 'Oflayn',
+                  text: 'Oflayn rejimdasiz — chat faqat onlayn serverda do‘stlar bilan ishlaydi.',
+                  timestamp: Date.now(),
+                  isSystem: true,
+                },
+              ]);
+              return;
+            }
+            netRef.current.sendChat(text);
+          }}
           onChatActiveChange={setChatActive}
           onAddFriend={(target) => netRef.current?.sendFriendRequest(target)}
+          onRespondFriendRequest={(id, accept) =>
+            netRef.current?.respondFriendRequest(id, accept)
+          }
+          onInviteFriend={(fid) => netRef.current?.inviteFriend(fid)}
           onJoinServer={handleJoinServer}
           onDismissInvite={(id) =>
             setInvites((prev) => prev.filter((inv) => inv.id !== id))
@@ -570,11 +700,14 @@ export default function App() {
       <NeonMenu
         phase={phase}
         wsConnected={wsConnected}
+        connectionState={browserOnline ? connectionState : 'offline'}
         playerId={playerId}
         playerNickname={playerNickname}
         friendCode={friendCode}
         currentRoom={liveRoom}
+        isOfflineRoom={isOfflineRoom}
         servers={servers}
+        offlineWorlds={offlineWorlds}
         onlinePlayers={onlinePlayers}
         social={social}
         invites={invites}
@@ -587,6 +720,7 @@ export default function App() {
         onResumeGame={handleResumeGame}
         onCreateServer={handleCreateServer}
         onJoinServer={handleJoinServer}
+        onPlayOffline={handlePlayOffline}
         onLeaveServer={handleLeaveServer}
         onSendFriendRequest={(target) => netRef.current?.sendFriendRequest(target)}
         onRespondFriendRequest={(id, accept) =>
